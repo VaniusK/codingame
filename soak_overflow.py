@@ -1,3 +1,5 @@
+# 291/4000, Gold League(76/322)
+
 import sys
 import math
 from abc import ABC, abstractmethod

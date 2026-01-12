@@ -1,10 +1,13 @@
-# 930/3400, Gold League(6/942)
+# 930/3400, Silver League(6/942)
+
 from __future__ import annotations
 import sys
 import math
 from enum import Enum
 
-ORE_THRESHOLD = 30
+ORE_THRESHOLD = 20
+ROBOT_SPEED = 4
+
 
 class Team(Enum):
     ALLY = 0
@@ -38,6 +41,8 @@ class Point:
     
     def __repr__(self):
         return f"Point({self.x}, {self.y})"
+
+DIRECTIONS = [Point(1, 0), Point(0, 1), Point(-1, 0), Point(0, -1), Point(0, 0)]
 
 class Cell:
     def __init__(self, position: Point, ore: int | None, hole: bool):
@@ -85,6 +90,11 @@ class Robot:
         self.__command: str | None = None
         self.radar_destination: Point | None = None
         self.is_camping: bool = False
+        self.role = "Miner"
+        self.radar_holder_cooldown: int = 0
+        self.destroyed_radars: int = 0
+        self.holding_equip: bool = False # Радар или мина
+        # Underused rn
         # __, чтобы своими грязными руками в вызов команды не лезли
     
     '''
@@ -104,6 +114,9 @@ class Robot:
     
     def REQUEST(self, item: Item, message: str = ""):
         self.__command = f"REQUEST {item.name} {message}"
+    
+    def __repr__(self):
+        return f"Robot({self.id})"
     
     def act(self):
         if not self.__command:
@@ -179,7 +192,7 @@ class GameState:
         self.trap_cooldown: int = 0
         self.ally_radars: list[Point] = []
         self.ally_traps: list[Point] = []
-        self.is_first_turn = True
+        self.turn = 0
 
 
     def update_state(self):
@@ -191,7 +204,7 @@ class GameState:
         for i in range(entity_count):
             entity_id, entity_type, x, y, item = [int(j) for j in input().split()]
             if entity_type in [0, 1]:
-                if self.is_first_turn:
+                if self.turn == 0:
                     robot = Robot(entity_id, Team(entity_type), Point(x, y), Item(item))
                     self.robots[entity_id] = robot
                     if robot.team == Team.ALLY:
@@ -207,13 +220,16 @@ class GameState:
             elif entity_type == 3:
                 self.ally_traps.append(Point(x, y))
         
-        self.is_first_turn = False
+        self.turn += 1
 
 class Controller:
     def __init__(self, game_state: GameState):
         self.game_state = game_state
         self.dangerous_cells = set()
         self.visible_ore: int = 0
+        self.potential_enemy_radars = []
+        self.enemy_radar_cooldown: int = 0 # predicted
+        self.enemies_with_equip = []
     
     @property
     def game_map(self) -> GameMap:
@@ -229,10 +245,14 @@ class Controller:
     
     def game_step(self):
         self.game_state.update_state()
+        self.enemy_radar_cooldown = max(self.enemy_radar_cooldown - 1, 0)
+        self.ally_robots[0].role = "Camper"
+        self.ally_robots[1].role = "Hunter"
 
         self.detect_dangerous_cells()
         self.calculate_radar_exploration_scores()
         self.calculate_visible_ore()
+        self.detect_enemy_radars()
         
         for robot in self.ally_robots:
             # Не тратим вычислительное время на мёртвых роботов
@@ -244,6 +264,54 @@ class Controller:
         for robot in self.ally_robots:
             robot.act()
     
+    def detect_enemy_radars(self):
+        for enemy in self.enemy_robots:
+            if enemy.position.x == 0:
+                enemy.radar_holder_cooldown = 0
+        enemy_holders = []
+        to_reset_radar_cooldown = False
+        for enemy in self.enemy_robots:
+            if enemy.previous_position:
+                if enemy.previous_position.x == 0 and enemy.position.x == 0 and self.enemy_radar_cooldown == 0:
+                    enemy_holders.append(enemy)
+                    to_reset_radar_cooldown = True
+        # Предполагаем, что противник берёт радар, сразу, как может
+        # (прошёл кулдаун + кто-то стоит на базе два хода — "что-то берёт")
+        if to_reset_radar_cooldown:
+            self.enemy_radar_cooldown = 5
+        
+        if len(enemy_holders) == 1:
+            enemy_holders[0].holding_equip = True
+            self.enemies_with_equip.append(enemy_holders[0])
+            # Если один - 99% радар несёт
+            # Если два - радар и мина
+            # Если больше - сложно понять, у кого из них радар, + риск мины.
+        for holder in self.enemies_with_equip:
+            if holder.previous_position:
+                if holder.previous_position == holder.position and holder.position.x != 0:
+                    for direction in DIRECTIONS:
+                        position = holder.position + direction
+                        if self.game_map.is_valid(position):
+                            cell = self.game_map[position]
+                            if cell.hole and not cell.previous_hole and not position in self.potential_enemy_radars:
+                                self.potential_enemy_radars.append(position)
+                                holder.radar_holder_cooldown = 5
+                                holder.holding_equip = False
+                                self.enemies_with_equip.remove(holder)
+                                break
+            
+            if holder.radar_holder_cooldown > 0:
+                continue
+            # Если "ничего не поставил", "просто постояв на месте", то чекаем даже существующие ямы
+            if holder.previous_position:
+                if holder.previous_position == holder.position and holder.position.x != 0:
+                    for direction in DIRECTIONS:
+                        position = holder.previous_position + direction
+                        if self.game_map.is_valid(position):
+                            cell = self.game_map[position]
+                            if cell.hole and not position in self.potential_enemy_radars:
+                                self.potential_enemy_radars.append(position)
+        
     def detect_dangerous_cells(self):
         for cell in self.game_map.cells:
             if (cell.hole and not cell.previous_hole) or (cell.ore is not None and cell.previous_ore is not None and cell.ore < cell.previous_ore):
@@ -251,6 +319,7 @@ class Controller:
                 for enemy in self.enemy_robots:
                     if enemy.position - cell.position <= 1:
                         nearby_enemies += 1
+                        break
                 if nearby_enemies > 0:
                     self.dangerous_cells.add(cell.position)
     
@@ -261,22 +330,32 @@ class Controller:
                 self.visible_ore += cell.ore
     
     def calculate_radar_exploration_scores(self):
-        for cell in self.game_map.cells:
-            cell.radar_exploration_score = 0
-            for xdiff in range(-4, 5):
-                max_ydiff = 4 - abs(xdiff)
-                for ydiff in range(-max_ydiff, max_ydiff + 1):
-                    new_position = cell.position + Point(xdiff, ydiff)
-                    if not self.game_map.is_valid(new_position):
-                        continue
-                    if self.game_map[new_position].ore == None:
-                        cell.radar_exploration_score += 1
+        if self.game_state.turn == 1:
+            for cell in self.game_map.cells:
+                for xdiff in range(-4, 5):
+                    max_ydiff = 4 - abs(xdiff)
+                    for ydiff in range(-max_ydiff, max_ydiff + 1):
+                        neighbor = cell.position + Point(xdiff, ydiff)
+                        if self.game_map.is_valid(neighbor):
+                            self.game_map[neighbor].radar_exploration_score += 1
+        else:
+            for cell in self.game_map.cells:
+                if cell.previous_ore is None and cell.ore is not None:
+                    for xdiff in range(-4, 5):
+                        max_ydiff = 4 - abs(xdiff)
+                        for ydiff in range(-max_ydiff, max_ydiff + 1):
+                            neighbor = cell.position + Point(xdiff, ydiff)
+                            if self.game_map.is_valid(neighbor):
+                                self.game_map[neighbor].radar_exploration_score -= 1
+                        
+
     
     def calculate_radar_position_score(self, robot: Robot, position: Point) -> float:
         EXPLORATION_BONUS = 1
-        ORE_BONUS = 30
+        ORE_BONUS = 20
         TRAP_BONUS = -1000
         DISTANCE_COEFF = 0.01
+        # Проблема: почему-то иногда ставит радар на подозрительные клетки
 
         score: float = 0
         score += self.game_map[position].radar_exploration_score * EXPLORATION_BONUS * (1 - DISTANCE_COEFF * position.x)
@@ -295,6 +374,20 @@ class Controller:
     
     def decide_robot_action(self, robot: Robot):
         robot.is_camping = False
+        if robot.role == "Hunter":
+            holder = None
+            if len(self.enemies_with_equip) >= 1:
+                holder = self.enemies_with_equip[0]
+            if self.potential_enemy_radars:
+                robot.DIG(self.potential_enemy_radars[0], "Ломаю вражеский радар")
+                if robot.position - self.potential_enemy_radars[0] <= 1:
+                    robot.DIG(self.potential_enemy_radars[0], "Сломал вражеский радар")
+                    robot.destroyed_radars += 1
+                    self.potential_enemy_radars.pop(0)
+                return
+            elif holder:
+                robot.MOVE(holder.position, "Иду за вражеским радарщиком")
+                return
         if robot.inventory == Item.ORE:
             # Несёшь руду - ну и неси
             robot.MOVE(Point(0, robot.position.y), "Несу руду")
@@ -308,6 +401,8 @@ class Controller:
                 cell.ore -= 1
             return
         
+            
+        
         if self.visible_ore < ORE_THRESHOLD and self.game_state.radar_cooldown == 0 and robot.position.x == 0:
             robot.REQUEST(Item.RADAR, "Иду за радаром")
             self.game_state.radar_cooldown = -1
@@ -320,7 +415,7 @@ class Controller:
         if self.visible_ore > 0:
             ore_cells = [cell for cell in self.game_map.cells if cell.has_ore and not cell.position in self.dangerous_cells]
             if ore_cells:
-                cell = min(ore_cells, key=lambda x: x.position - robot.position)
+                cell = min(ore_cells, key=lambda x: x.position - robot.position + x.position.x)
                 robot.DIG(cell.position, "Иду копать руду")
                 # Чтобы другие за пустой не бегали. На следующем ходу
                 # обновится правильным значением
@@ -335,9 +430,10 @@ class Controller:
         
         radar_holders = [robot for robot in self.ally_robots if robot.inventory == Item.RADAR]
         if radar_holders:
-            closest_radar_holder = min(radar_holders, key=lambda point: point.position - robot.position + point.position.x)
-            robot.MOVE(closest_radar_holder.position, "Иду за радарщиком")
-            return
+            closest_radar_holder = min(radar_holders, key=lambda point: point.position - robot.position)
+            if closest_radar_holder.radar_destination:
+                robot.MOVE(closest_radar_holder.radar_destination, "Иду за радарщиком")
+                return
 
 
         

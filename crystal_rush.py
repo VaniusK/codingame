@@ -1,4 +1,4 @@
-# 930/3400, Silver League(6/942)
+# 930/3400, Silver League(4/942)
 
 from __future__ import annotations
 import sys
@@ -54,6 +54,7 @@ class Cell:
         self.previous_hole: bool = False
         self.ally_radar: bool = False
         self.radar_exploration_score: int = 0
+        self.destroyed_enemy_radar: bool = False
     
 
     @property
@@ -249,10 +250,12 @@ class Controller:
         self.ally_robots[0].role = "Camper"
         self.ally_robots[1].role = "Hunter"
 
+
         self.detect_dangerous_cells()
         self.calculate_radar_exploration_scores()
         self.calculate_visible_ore()
         self.detect_enemy_radars()
+        print(self.calculate_radar_position_score(self.ally_robots[0], Point(8, 4)), self.calculate_radar_position_score(self.ally_robots[0], Point(12, 5)), file=sys.stderr, flush=True)
         
         for robot in self.ally_robots:
             # Не тратим вычислительное время на мёртвых роботов
@@ -296,9 +299,9 @@ class Controller:
                             if cell.hole and not cell.previous_hole and not position in self.potential_enemy_radars:
                                 self.potential_enemy_radars.append(position)
                                 holder.radar_holder_cooldown = 5
-                                holder.holding_equip = False
-                                self.enemies_with_equip.remove(holder)
-                                break
+                    if holder.radar_holder_cooldown > 0:
+                        holder.holding_equip = False
+                        self.enemies_with_equip.remove(holder)
             
             if holder.radar_holder_cooldown > 0:
                 continue
@@ -311,6 +314,7 @@ class Controller:
                             cell = self.game_map[position]
                             if cell.hole and not position in self.potential_enemy_radars:
                                 self.potential_enemy_radars.append(position)
+                                holder.radar_holder_cooldown = 5
         
     def detect_dangerous_cells(self):
         for cell in self.game_map.cells:
@@ -320,7 +324,7 @@ class Controller:
                     if enemy.position - cell.position <= 1:
                         nearby_enemies += 1
                         break
-                if nearby_enemies > 0:
+                if nearby_enemies > 0 and not cell.destroyed_enemy_radar:
                     self.dangerous_cells.add(cell.position)
     
     def calculate_visible_ore(self):
@@ -352,13 +356,18 @@ class Controller:
     
     def calculate_radar_position_score(self, robot: Robot, position: Point) -> float:
         EXPLORATION_BONUS = 1
-        ORE_BONUS = 20
+        ORE_BONUS = 10
+        ENEMY_RADAR_BONUS = 1
         TRAP_BONUS = -1000
         DISTANCE_COEFF = 0.01
+        TIME_DECAY_COEFF = 0.003
         # Проблема: почему-то иногда ставит радар на подозрительные клетки
 
+        if self.game_map[position].destroyed_enemy_radar:
+            EXPLORATION_BONUS += ENEMY_RADAR_BONUS
+
         score: float = 0
-        score += self.game_map[position].radar_exploration_score * EXPLORATION_BONUS * (1 - DISTANCE_COEFF * position.x)
+        score += self.game_map[position].radar_exploration_score * EXPLORATION_BONUS * (1 - DISTANCE_COEFF * position.x * (1 - self.game_state.turn * TIME_DECAY_COEFF))
         if self.game_map[position].has_ore:
             score += ORE_BONUS * (1 - DISTANCE_COEFF * (robot.position - position))
         if position in self.dangerous_cells:
@@ -374,7 +383,7 @@ class Controller:
     
     def decide_robot_action(self, robot: Robot):
         robot.is_camping = False
-        if robot.role == "Hunter":
+        if robot.role == "Hunter" and self.game_state.turn < 200:
             holder = None
             if len(self.enemies_with_equip) >= 1:
                 holder = self.enemies_with_equip[0]
@@ -383,6 +392,9 @@ class Controller:
                 if robot.position - self.potential_enemy_radars[0] <= 1:
                     robot.DIG(self.potential_enemy_radars[0], "Сломал вражеский радар")
                     robot.destroyed_radars += 1
+                    self.game_map[self.potential_enemy_radars[0]].destroyed_enemy_radar = True
+                    if self.potential_enemy_radars[0] in self.dangerous_cells:
+                        self.dangerous_cells.remove(self.potential_enemy_radars[0])
                     self.potential_enemy_radars.pop(0)
                 return
             elif holder:
